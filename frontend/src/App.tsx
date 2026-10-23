@@ -1,6 +1,7 @@
 import { useRef, useState } from 'react'
 import { StreamParser, type ParsedStream } from './lib/streamParser'
 import { streamSSE } from './lib/sse'
+import { probeBackend, runLocalGenerate, runLocalSubmit } from './lib/mockStream'
 import GenUIRenderer from './components/GenUIRenderer'
 import type { GenComponent } from './schema'
 
@@ -37,6 +38,43 @@ export default function App() {
       if (el) el.scrollTop = el.scrollHeight
     })
 
+  type H = Record<string, (d: Record<string, unknown>) => void>
+
+  /**
+   * 统一事件处理 + 后端探测：
+   * 后端可达 → SSE 真实流；不可达（GitHub Pages）→ 浏览器端同构模拟流。
+   * 两种来源产出相同事件序列，渲染路径零分叉。
+   */
+  async function runStream(
+    agentId: number,
+    parser: StreamParser,
+    doReal: (handlers: H) => Promise<void>,
+    doLocal: (emit: (event: string, data: Record<string, unknown>) => void) => Promise<void>,
+  ) {
+    const modeTag = (d: Record<string, unknown>) =>
+      `${d.mode === 'real' ? '🤖' : d.mode === 'local' ? '🖥' : '🧪'} ${String(d.model)}`
+    const handlers: H = {
+      meta: (d) => patch(agentId, (e) => ({ ...e, mode: modeTag(d) })),
+      fallback: (d) => patch(agentId, (e) => ({ ...e, fallback: String(d.reason) })),
+      delta: (d) => {
+        const r = parser.push(String(d.text))
+        patch(agentId, (e) => ({ ...e, stream: r }))
+        scrollDown()
+      },
+      error: (d) => patch(agentId, (e) => ({ ...e, error: String(d.message) })),
+      done: () => {
+        const r = parser.finish()
+        patch(agentId, (e) => ({ ...e, stream: r }))
+        scrollDown()
+      },
+    }
+    if (await probeBackend()) {
+      await doReal(handlers)
+    } else {
+      await doLocal((event, data) => handlers[event]?.(data))
+    }
+  }
+
   async function send(message: string) {
     if (!message.trim() || busy) return
     setInput('')
@@ -57,21 +95,12 @@ export default function App() {
     scrollDown()
 
     try {
-      await streamSSE('/api/generate', { message }, {
-        meta: (d) => patch(agentId, (e) => ({ ...e, mode: `${d.mode === 'real' ? '🤖' : '🧪'} ${d.model}` })),
-        fallback: (d) => patch(agentId, (e) => ({ ...e, fallback: String(d.reason) })),
-        delta: (d) => {
-          const r = parser.push(String(d.text))
-          patch(agentId, (e) => ({ ...e, stream: r }))
-          scrollDown()
-        },
-        error: (d) => patch(agentId, (e) => ({ ...e, error: String(d.message) })),
-        done: () => {
-          const r = parser.finish()
-          patch(agentId, (e) => ({ ...e, stream: r }))
-          scrollDown()
-        },
-      })
+      await runStream(
+        agentId,
+        parser,
+        (h) => streamSSE('/api/generate', { message }, h),
+        (emit) => runLocalGenerate(message, emit),
+      )
     } catch (err) {
       patch(agentId, (e) => ({ ...e, error: String(err) }))
     } finally {
@@ -99,21 +128,12 @@ export default function App() {
     scrollDown()
 
     try {
-      await streamSSE('/api/submit', { form_id: formId, values }, {
-        meta: (d) => patch(agentId, (e) => ({ ...e, mode: `${d.mode === 'real' ? '🤖' : '🧪'} ${d.model}` })),
-        fallback: (d) => patch(agentId, (e) => ({ ...e, fallback: String(d.reason) })),
-        delta: (d) => {
-          const r = parser.push(String(d.text))
-          patch(agentId, (e) => ({ ...e, stream: r }))
-          scrollDown()
-        },
-        error: (d) => patch(agentId, (e) => ({ ...e, error: String(d.message) })),
-        done: () => {
-          const r = parser.finish()
-          patch(agentId, (e) => ({ ...e, stream: r }))
-          scrollDown()
-        },
-      })
+      await runStream(
+        agentId,
+        parser,
+        (h) => streamSSE('/api/submit', { form_id: formId, values }, h),
+        (emit) => runLocalSubmit(formId, values, emit),
+      )
     } catch (err) {
       patch(agentId, (e) => ({ ...e, error: String(err) }))
     } finally {
