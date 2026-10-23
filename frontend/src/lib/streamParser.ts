@@ -42,10 +42,14 @@ export class StreamParser {
   push(chunk: string): ParsedStream {
     this.buf += chunk
     if (this.arrayStart === -1) {
-      this.arrayStart = this.buf.indexOf('"components"')
-      if (this.arrayStart === -1) return this.result(false)
-      const bracket = this.buf.indexOf('[', this.arrayStart)
+      // 注意：必须等 [ 也到位后才标记初始化完成。
+      // 否则 "components" 与 [ 跨 chunk 时，下次 push 会跳过初始化，
+      // 从下标 0 扫描会把外层 { 计入深度，导致组件永远无法在深度 0 闭合。
+      const keyIdx = this.buf.indexOf('"components"')
+      if (keyIdx === -1) return this.result(false)
+      const bracket = this.buf.indexOf('[', keyIdx)
       if (bracket === -1) return this.result(false)
+      this.arrayStart = keyIdx
       this.scanned = bracket + 1
     }
     this.scan()
